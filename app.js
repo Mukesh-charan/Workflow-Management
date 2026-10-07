@@ -385,6 +385,10 @@ function handleNatureOfWorkAyToggle(prefix) {
     } else {
         ayGroup.classList.remove('hidden');
     }
+
+    if (prefix === 'assignWork' && typeof fetchEmployeeRecommendations === 'function') {
+        fetchEmployeeRecommendations();
+    }
 }
 
 function toggleAssignWorkModal(shouldShow, taskIdToEdit) {
@@ -449,6 +453,8 @@ function toggleAssignWorkModal(shouldShow, taskIdToEdit) {
         document.getElementById('assignWorkClientSelect').value = "";
         document.getElementById('assignWorkClientSelect_display').value = "";
         document.getElementById('assignWorkAssessmentYear').value = "";
+        const recBox = document.getElementById('assignWorkRecBox');
+        if (recBox) recBox.style.display = 'none';
         editingTaskId = null;
     }
 }
@@ -2017,6 +2023,9 @@ function selectClientFromPicker(clientId) {
         hiddenInput.value = JSON.stringify({ id: client.id, name: client.name });
         const changeEvent = new Event('change', { bubbles: true });
         hiddenInput.dispatchEvent(changeEvent);
+        if (activeClientPickerTarget === 'assignWorkClientSelect' && typeof fetchEmployeeRecommendations === 'function') {
+            fetchEmployeeRecommendations();
+        }
     }
 
     if (displayInput) {
@@ -2257,4 +2266,406 @@ function changeAuditPage(page) {
     auditCurrentPage = page;
     renderAuditLogsViewport();
 }
+
+// ==========================================
+// 1. SMART EMPLOYEE RECOMMENDATION ENGINE
+// ==========================================
+let _recommendationDebounce = null;
+async function fetchEmployeeRecommendations() {
+    clearTimeout(_recommendationDebounce);
+    _recommendationDebounce = setTimeout(async () => {
+        const clientInput = document.getElementById('assignWorkClientSelect');
+        const natureInput = document.getElementById('assignWorkNatureSelect');
+        const recBox = document.getElementById('assignWorkRecBox');
+        const recList = document.getElementById('assignWorkRecList');
+        const recStatus = document.getElementById('recBoxStatus');
+        if (!recBox || !recList) return;
+
+        let clientCode = '';
+        if (clientInput && clientInput.value) {
+            try {
+                const parsed = JSON.parse(clientInput.value);
+                clientCode = parsed.id ? String(parsed.id) : '';
+            } catch (e) {}
+        }
+        const natureOfWork = natureInput ? natureInput.value : '';
+
+        if (!clientCode && !natureOfWork) {
+            recBox.style.display = 'none';
+            return;
+        }
+
+        recBox.style.display = 'block';
+        if (recStatus) recStatus.innerText = "Analyzing history...";
+        recList.innerHTML = `<div style="font-size:0.75rem; color:#64748b; padding:0.25rem;">Calculating match scores...</div>`;
+
+        try {
+            const res = await authFetch(`/api/recommend?clientCode=${encodeURIComponent(clientCode)}&natureOfWork=${encodeURIComponent(natureOfWork)}`).then(r => r.json());
+            if (res.success && res.recommendations && res.recommendations.length > 0) {
+                if (recStatus) recStatus.innerText = `${res.recommendations.length} evaluated`;
+                recList.innerHTML = "";
+                res.recommendations.slice(0, 4).forEach((rec, idx) => {
+                    const isTop = idx === 0;
+                    const card = document.createElement('div');
+                    card.className = 'rec-card';
+                    card.title = "Click to assign this employee";
+                    card.onclick = () => selectRecommendedOperator(rec.username);
+                    card.innerHTML = `
+                        <div style="flex:1;">
+                            <div style="font-weight:600; font-size:0.8rem; color:var(--primary-color);">
+                                ${rec.name} <span style="font-weight:400; color:#64748b; font-size:0.75rem;">(@${rec.username})</span>
+                            </div>
+                            <div style="font-size:0.7rem; color:#64748b; margin-top:2px;">
+                                ${rec.reasons.length ? rec.reasons.slice(0, 2).join(' • ') : 'Standard workload'}
+                            </div>
+                        </div>
+                        <div class="rec-score-badge ${isTop ? 'top-match' : ''}">
+                            ${rec.score}% Match
+                        </div>
+                    `;
+                    recList.appendChild(card);
+                });
+            } else {
+                if (recStatus) recStatus.innerText = "No data";
+                recList.innerHTML = `<div style="font-size:0.75rem; color:#64748b; padding:0.25rem;">No recommendations available.</div>`;
+            }
+        } catch (err) {
+            console.warn('Failed to load recommendations:', err);
+            recBox.style.display = 'none';
+        }
+    }, 200);
+}
+
+function selectRecommendedOperator(username) {
+    const select = document.getElementById('assignWorkOperatorSelect');
+    if (select) {
+        select.value = username;
+        select.style.borderColor = 'var(--success-color)';
+        setTimeout(() => { select.style.borderColor = ''; }, 1200);
+    }
+}
+
+// ==========================================
+// 2. RAG CHATBOT ASSISTANT
+// ==========================================
+function toggleChatbot() {
+    const windowEl = document.getElementById('chatbotWindow');
+    if (!windowEl) return;
+    windowEl.classList.toggle('hidden');
+    if (!windowEl.classList.contains('hidden')) {
+        document.getElementById('chatInputText')?.focus();
+    }
+}
+
+function sendChatPrompt(promptText) {
+    const input = document.getElementById('chatInputText');
+    if (input) {
+        input.value = promptText;
+        handleChatSubmit(new Event('submit'));
+    }
+}
+
+async function handleChatSubmit(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    const input = document.getElementById('chatInputText');
+    const msgList = document.getElementById('chatMessageList');
+    if (!input || !msgList) return;
+
+    const query = input.value.trim();
+    if (!query) return;
+
+    // Add user message
+    const userDiv = document.createElement('div');
+    userDiv.className = 'chat-msg user';
+    userDiv.innerText = query;
+    msgList.appendChild(userDiv);
+    input.value = '';
+    msgList.scrollTop = msgList.scrollHeight;
+
+    // Add loading indicator
+    const loadingDiv = document.createElement('div');
+    loadingDiv.className = 'chat-msg bot';
+    loadingDiv.id = 'chatLoadingBubble';
+    loadingDiv.innerText = 'Searching records & Drive vault...';
+    msgList.appendChild(loadingDiv);
+    msgList.scrollTop = msgList.scrollHeight;
+
+    try {
+        const res = await authFetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: query })
+        }).then(r => r.json());
+
+        loadingDiv.remove();
+
+        const botDiv = document.createElement('div');
+        botDiv.className = 'chat-msg bot';
+
+        if (res.success && res.reply) {
+            let formatted = res.reply
+                .replace(/### (.*?)\n/g, '<div style="font-weight:700; color:var(--primary-color); margin:0.4rem 0 0.2rem;">$1</div>')
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                .replace(/`([^`]+)`/g, '<code style="background:#f1f5f9; padding:2px 4px; border-radius:4px; font-size:0.8rem;">$1</code>')
+                .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:var(--accent-color); text-decoration:underline;">$1</a>')
+                .replace(/\n/g, '<br>');
+            botDiv.innerHTML = formatted;
+        } else {
+            botDiv.innerText = res.message || 'Sorry, could not process request.';
+        }
+        msgList.appendChild(botDiv);
+        msgList.scrollTop = msgList.scrollHeight;
+    } catch (err) {
+        loadingDiv.remove();
+        const errDiv = document.createElement('div');
+        errDiv.className = 'chat-msg bot';
+        errDiv.innerText = 'Network error contacting chatbot.';
+        msgList.appendChild(errDiv);
+        msgList.scrollTop = msgList.scrollHeight;
+    }
+}
+
+// ==========================================
+// 3. AUTO-PILOT PIPELINE (HITL BATCH AUTOMATION)
+// ==========================================
+let currentPipelineProposals = [];
+
+function toggleAutoPipelineModal(shouldShow) {
+    const modal = document.getElementById('autoPipelineModalOverlay');
+    if (!modal) return;
+    if (shouldShow) {
+        modal.classList.remove('hidden');
+        loadAutoPipelinePreview();
+    } else {
+        modal.classList.add('hidden');
+    }
+}
+
+async function loadAutoPipelinePreview() {
+    const tbody = document.getElementById('autoPipelineTableBody');
+    const dispatchBtn = document.getElementById('dispatchPipelineBtn');
+    if (!tbody) return;
+
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:1.5rem; color:#64748b;">Scanning upcoming compliance deadlines & matching staff...</td></tr>`;
+
+    try {
+        const res = await authFetch('/api/automate?action=preview').then(r => r.json());
+        if (res.success && res.proposals && res.proposals.length > 0) {
+            currentPipelineProposals = res.proposals;
+            tbody.innerHTML = '';
+            res.proposals.forEach((p, idx) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><strong>${p.clientName}</strong> <span style="font-size:0.75rem; color:#64748b;">(#${p.clientCode})</span></td>
+                    <td><span class="status status-assigned" style="font-size:0.75rem;">${p.natureOfWork}</span></td>
+                    <td style="font-family:monospace;">${p.assessmentYear}</td>
+                    <td>
+                        <select class="form-control" style="font-size:0.8rem; padding:0.25rem 0.5rem;" onchange="currentPipelineProposals[${idx}].recommendedOperator = this.value">
+                            ${usersDB.filter(u => u.role !== 'partner').map(u => `
+                                <option value="${u.username}" ${u.username === p.recommendedOperator ? 'selected' : ''}>${u.name} (@${u.username})</option>
+                            `).join('')}
+                        </select>
+                    </td>
+                    <td><span style="font-size:0.75rem; color:#0369a1; background:#e0f2fe; padding:2px 6px; border-radius:4px;">${p.recommendationReason}</span></td>
+                    <td style="white-space:nowrap;">${p.dueDate}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+            if (dispatchBtn) {
+                dispatchBtn.disabled = false;
+                dispatchBtn.innerText = `Approve & Dispatch All (${res.proposals.length})`;
+            }
+        } else {
+            currentPipelineProposals = [];
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:1.5rem; color:#10b981; font-weight:600;">All clients up to date for this period! No pending automated filings needed.</td></tr>`;
+            if (dispatchBtn) dispatchBtn.disabled = true;
+        }
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:1.5rem; color:var(--danger-color);">Error loading pipeline: ${e.message}</td></tr>`;
+    }
+}
+
+async function executeAutoPipelineDispatch() {
+    if (!currentPipelineProposals || currentPipelineProposals.length === 0) return;
+    if (!confirm(`Dispatch and create all ${currentPipelineProposals.length} compliance tasks automatically?`)) return;
+
+    showSpinner("Dispatching pipeline tasks...");
+    try {
+        const res = await authFetch('/api/automate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'dispatch',
+                items: currentPipelineProposals
+            })
+        }).then(r => r.json());
+
+        hideSpinner();
+        if (res.success) {
+            alert(res.message);
+            toggleAutoPipelineModal(false);
+            await fetchAndRenderTasks();
+            await updateTaskAnalyticsSummary();
+        } else {
+            alert("Pipeline dispatch error: " + res.message);
+        }
+    } catch (err) {
+        hideSpinner();
+        alert("Network error executing pipeline dispatch.");
+    }
+}
+
+// ==========================================
+// 4. GOOGLE DRIVE VAULT INTEGRATION
+// ==========================================
+let currentDriveFiles = [];
+
+function toggleGoogleDriveModal(shouldShow) {
+    const modal = document.getElementById('googleDriveModalOverlay');
+    if (!modal) return;
+    if (shouldShow) {
+        modal.classList.remove('hidden');
+        checkGoogleDriveStatus();
+    } else {
+        modal.classList.add('hidden');
+    }
+}
+
+async function checkGoogleDriveStatus() {
+    const setupPanel = document.getElementById('gdriveSetupPanel');
+    const browserPanel = document.getElementById('gdriveBrowserPanel');
+    const subtitle = document.getElementById('gdriveStatusSubtitle');
+
+    try {
+        const res = await authFetch('/api/drive?action=status').then(r => r.json());
+        if (res.success && res.configured && res.connected !== false) {
+            setupPanel.classList.add('hidden');
+            browserPanel.classList.remove('hidden');
+            subtitle.innerText = `Connected: ${res.clientEmail || 'Service Account'}`;
+            subtitle.style.color = 'var(--success-color)';
+            loadGoogleDriveFiles();
+        } else {
+            setupPanel.classList.remove('hidden');
+            browserPanel.classList.add('hidden');
+            subtitle.innerText = res.error ? `Connection issue: ${res.error}` : 'Not connected';
+            subtitle.style.color = 'var(--danger-color)';
+        }
+    } catch (e) {
+        setupPanel.classList.remove('hidden');
+    }
+}
+
+async function saveGoogleDriveConfig() {
+    const jsonStr = document.getElementById('gdriveCredsJson')?.value.trim();
+    const folderId = document.getElementById('gdriveRootFolderId')?.value.trim();
+    if (!jsonStr) {
+        alert("Please paste your Service Account JSON credentials.");
+        return;
+    }
+
+    showSpinner("Verifying and connecting Google Service Account...");
+    try {
+        const res = await authFetch('/api/drive', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'configure',
+                credentialsJson: jsonStr,
+                folderId: folderId || null
+            })
+        }).then(r => r.json());
+
+        hideSpinner();
+        if (res.success) {
+            alert("Google Drive Service Account connected successfully!");
+            checkGoogleDriveStatus();
+        } else {
+            alert("Connection error: " + res.message);
+        }
+    } catch (e) {
+        hideSpinner();
+        alert("Failed to connect Google Drive: " + e.message);
+    }
+}
+
+async function loadGoogleDriveFiles(query = '') {
+    const tbody = document.getElementById('gdriveFilesTableBody');
+    if (!tbody) return;
+
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; padding:1.5rem; color:#64748b;">Loading Drive files...</td></tr>`;
+
+    try {
+        const url = `/api/drive?action=listFiles${query ? `&query=${encodeURIComponent(query)}` : ''}`;
+        const res = await authFetch(url).then(r => r.json());
+        if (res.success && res.files && res.files.length > 0) {
+            currentDriveFiles = res.files;
+            tbody.innerHTML = '';
+            res.files.forEach(f => {
+                const tr = document.createElement('tr');
+                const modifiedStr = f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString() : '-';
+                tr.innerHTML = `
+                    <td>
+                        <strong style="color:var(--primary-color);">${f.name}</strong>
+                    </td>
+                    <td style="font-size:0.75rem; color:#64748b;">${f.mimeType ? f.mimeType.split('.').pop() : 'file'}</td>
+                    <td>${modifiedStr}</td>
+                    <td>
+                        <a href="${f.webViewLink}" target="_blank" class="action-btn btn-secondary" style="text-decoration:none; display:inline-block; padding:0.3rem 0.6rem;">Open in Drive</a>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        } else {
+            currentDriveFiles = [];
+            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; padding:1.5rem; color:#94a3b8;">No documents found in Google Drive folder.</td></tr>`;
+        }
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; padding:1.5rem; color:var(--danger-color);">Error loading files: ${e.message}</td></tr>`;
+    }
+}
+
+let _driveSearchDebounce = null;
+function handleDriveSearch(val) {
+    clearTimeout(_driveSearchDebounce);
+    _driveSearchDebounce = setTimeout(() => {
+        loadGoogleDriveFiles(val.trim());
+    }, 300);
+}
+
+async function handleDriveFileUpload(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    showSpinner(`Uploading "${file.name}" to Google Drive...`);
+    try {
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+            const base64Data = event.target.result.split(',')[1];
+            const res = await authFetch('/api/drive', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'upload',
+                    fileName: file.name,
+                    mimeType: file.type,
+                    base64Data: base64Data
+                })
+            }).then(r => r.json());
+
+            hideSpinner();
+            if (res.success) {
+                alert("File uploaded successfully to Google Drive!");
+                loadGoogleDriveFiles();
+            } else {
+                alert("Upload failed: " + res.message);
+            }
+        };
+        reader.readAsDataURL(file);
+    } catch (err) {
+        hideSpinner();
+        alert("Upload error: " + err.message);
+    }
+}
+
 

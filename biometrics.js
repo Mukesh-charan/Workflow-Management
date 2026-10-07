@@ -146,7 +146,7 @@ async function startBiometricScan(mode, username, storedDescriptor) {
             
             const detections = await faceapi.detectSingleFace(
                 video, 
-                new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.35 })
+                new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.35 })
             ).withFaceLandmarks().withFaceDescriptor();
             
             context.clearRect(0, 0, canvas.width, canvas.height);
@@ -192,7 +192,7 @@ async function startBiometricScan(mode, username, storedDescriptor) {
                     }
                 } else if (mode.startsWith('auto_')) {
                     const matchResult = findBestFaceMatch(detections.descriptor);
-                    if (matchResult.bestMatch && matchResult.minDistance < 0.55) {
+                    if (matchResult.bestMatch && matchResult.minDistance < 0.58) {
                         clearInterval(detectionInterval);
                         document.getElementById('biometricStatusMsg').innerText = `Matched: ${matchResult.bestMatch.name}!`;
                         document.getElementById('biometricStatusMsg').style.color = "#10b981";
@@ -308,7 +308,7 @@ async function triggerBiometricAction() {
             const matchResult = findBestFaceMatch(detections.descriptor);
             hideSpinner();
 
-            if (matchResult.bestMatch && matchResult.minDistance < 0.55) {
+            if (matchResult.bestMatch && matchResult.minDistance < 0.58) {
                 if (detectionInterval) clearInterval(detectionInterval);
                 document.getElementById('biometricStatusMsg').innerText = `Matched: ${matchResult.bestMatch.name}!`;
                 document.getElementById('biometricStatusMsg').style.color = "#10b981";

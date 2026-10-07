@@ -19,8 +19,9 @@ module.exports = async (req, res) => {
         }
         const allUsers = await usersCollection.find({}).toArray();
         const usersData = allUsers.map(u => {
-            const { password, faceDescriptor, ...safeUser } = u;
-            safeUser.faceDescriptor = !!faceDescriptor;
+            const { password, ...safeUser } = u;
+            safeUser.hasFaceDescriptor = !!u.faceDescriptor;
+            safeUser.faceDescriptor = u.faceDescriptor || null;
             if (decoded.role === 'partner') {
                 return { ...safeUser, password: u.password };
             }

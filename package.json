@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "googleapis": "^183.0.0",
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^6.8.0"
   }

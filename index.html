@@ -54,6 +54,8 @@
                 </div>
                 <div class="nav-controls">
                     <div class="user-info">User: <span id="displayUser" style="font-weight:700; color:#38bdf8;">-</span> (<span id="displayRole" style="text-transform: capitalize;">-</span>)</div>
+                    <button class="btn-change-pass" id="autoPilotNavBtn" style="background:#0284c7; color:#fff; border:none;" onclick="toggleAutoPipelineModal(true)">⚡ Auto-Pilot</button>
+                    <button class="btn-change-pass" id="gdriveNavBtn" style="background:#10b981; color:#fff; border:none;" onclick="toggleGoogleDriveModal(true)">☁️ Drive Vault</button>
                     <button class="btn-change-pass" onclick="toggleSelfPasswordModal(true)">Change Password</button>
                     <button class="btn-logout" onclick="handleSecureSignout()">Logout</button>
                     <button id="menuToggleBtn" class="btn-menu-toggle" onclick="toggleSideMenu(true)">☰ Menu</button>
@@ -477,6 +479,13 @@
                     <div class="form-group">
                         <label>User (Optional)</label>
                         <select id="assignWorkOperatorSelect" class="form-control"></select>
+                        <div id="assignWorkRecBox" class="rec-box" style="display: none;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+                                <span style="font-size: 0.75rem; font-weight: 700; color: var(--primary-color);">Recommended Staff (AI Match)</span>
+                                <span id="recBoxStatus" style="font-size: 0.7rem; color: #64748b;"></span>
+                            </div>
+                            <div id="assignWorkRecList" style="display: flex; flex-direction: column; gap: 0.4rem; max-height: 140px; overflow-y: auto;"></div>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Due</label>
@@ -682,6 +691,126 @@
                     <!-- Populated dynamically via JS -->
                 </div>
                 <button class="btn-secondary" style="margin-top: 1.5rem;" onclick="toggleClientDetailsModal(false)">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Floating Chatbot Widget -->
+    <button class="chatbot-fab" id="chatbotFab" onclick="toggleChatbot()" title="AI Office Assistant">💬</button>
+    
+    <div class="chatbot-window hidden" id="chatbotWindow">
+        <div class="chatbot-header">
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <span>CA Office AI Assistant</span>
+                <span style="font-size:0.65rem; background:rgba(255,255,255,0.2); padding:2px 6px; border-radius:10px;">RAG + Search</span>
+            </div>
+            <button onclick="toggleChatbot()" style="background:none; border:none; color:#fff; font-size:1.2rem; cursor:pointer;">&times;</button>
+        </div>
+        <div class="chatbot-body" id="chatMessageList">
+            <div class="chat-msg bot">
+                Hello! I can help you search client records, check task deadlines, query attendance, or look up documents in your Google Drive Vault.
+                <div class="chat-chips">
+                    <button class="chat-chip" onclick="sendChatPrompt('Pending review tasks')">Pending Review</button>
+                    <button class="chat-chip" onclick="sendChatPrompt('Who is present today?')">Today's Attendance</button>
+                    <button class="chat-chip" onclick="sendChatPrompt('GST monthly returns status')">GST Returns</button>
+                </div>
+            </div>
+        </div>
+        <form class="chatbot-input-bar" onsubmit="handleChatSubmit(event)">
+            <input type="text" id="chatInputText" placeholder="Ask about clients, tasks, or drive docs..." autocomplete="off">
+            <button type="submit">Send</button>
+        </form>
+    </div>
+
+    <!-- Modal for Smart Auto-Pilot Pipeline (HITL) -->
+    <div class="modal-backdrop hidden" id="autoPipelineModalOverlay" style="z-index: 1050;">
+        <div class="modal-surface modal-surface-wide">
+            <div class="modal-header">
+                <div>
+                    <h3 style="margin:0;">Auto-Pilot Compliance Pipeline</h3>
+                    <span style="font-size:0.8rem; color:#64748b;">Human-in-the-Loop Smart Batch Generation</span>
+                </div>
+                <button class="modal-close-trigger" onclick="toggleAutoPipelineModal(false)">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="font-size:0.85rem; color:#475569; margin-bottom:1rem;">
+                    The system automatically detected upcoming filings and pre-matched the most qualified employee based on client history & tax expertise. Review and approve all with 1-click.
+                </p>
+                <div class="table-responsive" style="max-height:350px; overflow-y:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Client</th>
+                                <th>Filing Type</th>
+                                <th>Period</th>
+                                <th>Recommended Staff</th>
+                                <th>Match Reason</th>
+                                <th>Due Date</th>
+                            </tr>
+                        </thead>
+                        <tbody id="autoPipelineTableBody">
+                            <tr><td colspan="6" style="text-align:center; padding:1.5rem;">Scanning compliance schedule...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div style="display:flex; justify-content:flex-end; gap:0.75rem; margin-top:1.25rem;">
+                    <button class="btn-secondary" onclick="toggleAutoPipelineModal(false)">Cancel</button>
+                    <button id="dispatchPipelineBtn" class="btn-primary" style="background-color:var(--success-color);" onclick="executeAutoPipelineDispatch()">Approve & Dispatch All</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for Google Drive Vault Integration -->
+    <div class="modal-backdrop hidden" id="googleDriveModalOverlay" style="z-index: 1050;">
+        <div class="modal-surface modal-surface-wide">
+            <div class="modal-header">
+                <div>
+                    <h3 style="margin:0;">Google Drive Cloud Vault</h3>
+                    <span id="gdriveStatusSubtitle" style="font-size:0.8rem; color:#64748b;">Service Account Storage</span>
+                </div>
+                <button class="modal-close-trigger" onclick="toggleGoogleDriveModal(false)">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="gdriveSetupPanel" class="hidden" style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:1rem; margin-bottom:1rem;">
+                    <h4 style="margin:0 0 0.5rem 0; color:var(--primary-color);">Connect Google Service Account</h4>
+                    <p style="font-size:0.8rem; color:#475569; margin-bottom:0.75rem;">
+                        Paste your Google Service Account JSON credentials (or credentials JSON content) to connect Google Drive:
+                    </p>
+                    <textarea id="gdriveCredsJson" class="form-control" rows="4" placeholder='{"type": "service_account", "client_email": "...", "private_key": "..."}'></textarea>
+                    <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
+                        <input type="text" id="gdriveRootFolderId" class="form-control" placeholder="Optional Google Drive Root Folder ID">
+                        <button class="btn-primary" style="width:auto;" onclick="saveGoogleDriveConfig()">Connect Account</button>
+                    </div>
+                </div>
+
+                <div id="gdriveBrowserPanel">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
+                        <div style="display:flex; gap:0.5rem; align-items:center;">
+                            <input type="text" id="gdriveSearchInput" class="form-control" placeholder="Search Drive files..." oninput="handleDriveSearch(this.value)" style="width:250px;">
+                            <button class="btn-secondary" onclick="loadGoogleDriveFiles()">Refresh</button>
+                        </div>
+                        <div style="display:flex; gap:0.5rem;">
+                            <input type="file" id="gdriveFileInput" class="hidden" onchange="handleDriveFileUpload(event)">
+                            <button class="btn-primary" style="background-color:var(--accent-color);" onclick="document.getElementById('gdriveFileInput').click()">Upload Document</button>
+                        </div>
+                    </div>
+                    <div class="table-responsive" style="max-height:350px; overflow-y:auto;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Document Name</th>
+                                    <th>Type</th>
+                                    <th>Modified</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="gdriveFilesTableBody">
+                                <tr><td colspan="4" style="text-align:center; padding:1.5rem;">Loading files...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
