@@ -733,16 +733,28 @@ html, body {
     margin-top: 0.25rem;
 }
 .chat-chip {
-    font-size: 0.7rem;
+    font-size: 0.75rem;
     background: #e2e8f0;
     color: #334155;
-    padding: 0.2rem 0.5rem;
+    padding: 0.3rem 0.65rem;
     border-radius: 9999px;
     cursor: pointer;
-    border: none;
+    border: 1px solid #cbd5e1;
+    transition: all 0.15s ease;
+    font-weight: 500;
 }
 .chat-chip:hover {
-    background: #cbd5e1;
+    background: #0284c7;
+    color: #ffffff;
+    border-color: #0284c7;
+}
+.chat-chip.chat-chip-primary {
+    background: #0284c7;
+    color: #ffffff;
+    border-color: #0284c7;
+}
+.chat-chip.chat-chip-primary:hover {
+    background: #0369a1;
 }
 .chatbot-input-bar {
     display: flex;

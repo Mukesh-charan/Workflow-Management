@@ -22,6 +22,10 @@ Command output is condensed to save 60-90% LLM context window tokens while prese
 - Utilize Headroom context compression and Compress-Cache-Retrieve (CCR) for heavy JSON structures, file reads, and tool payloads to minimize prompt tokens.
 
 
+## JevGraph Knowledge Graph Context Optimization (Upstream: chenmingtang830/jevgraph)
+- When ingesting large specs, PRDs, PDFs, or architectural documentation, build or query bounded evidence-backed knowledge graphs (/jevgraph-build, /jevgraph-query) with character-level page maps instead of loading raw long documents into prompt context.
+
+
 ## Anti-Slop Filter & Quality Rules (Upstream: miqdadbadjuber/anti-slop)
 Follow Anti-Slop rules to prevent generic AI slop in generated UI, copy, and code comments (Mode: DURING):
 - **Filter, Not Style Guide:** Run purpose tests before aesthetic choices (reject ungrounded neon glows, fake metrics, generic sparkle badges).

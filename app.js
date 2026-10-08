@@ -2348,10 +2348,16 @@ function selectRecommendedOperator(username) {
 // ==========================================
 // 2. RAG CHATBOT ASSISTANT
 // ==========================================
-function toggleChatbot() {
+function toggleChatbot(shouldShow) {
     const windowEl = document.getElementById('chatbotWindow');
     if (!windowEl) return;
-    windowEl.classList.toggle('hidden');
+    if (shouldShow === true) {
+        windowEl.classList.remove('hidden');
+    } else if (shouldShow === false) {
+        windowEl.classList.add('hidden');
+    } else {
+        windowEl.classList.toggle('hidden');
+    }
     if (!windowEl.classList.contains('hidden')) {
         document.getElementById('chatInputText')?.focus();
     }
@@ -2362,6 +2368,102 @@ function sendChatPrompt(promptText) {
     if (input) {
         input.value = promptText;
         handleChatSubmit(new Event('submit'));
+    }
+}
+
+function formatChatBotText(rawText) {
+    if (!rawText) return '';
+    return rawText
+        .replace(/### (.*?)\n/g, '<div style="font-weight:700; color:var(--primary-color); margin:0.4rem 0 0.2rem;">$1</div>')
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        .replace(/`([^`]+)`/g, '<code style="background:#f1f5f9; padding:2px 4px; border-radius:4px; font-size:0.8rem; font-family:monospace;">$1</code>')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:var(--accent-color); text-decoration:underline;">$1</a>')
+        .replace(/\n/g, '<br>');
+}
+
+function appendBotMessage(replyText, chips = []) {
+    const msgList = document.getElementById('chatMessageList');
+    if (!msgList) return;
+
+    const botDiv = document.createElement('div');
+    botDiv.className = 'chat-msg bot';
+    botDiv.innerHTML = formatChatBotText(replyText);
+
+    if (chips && chips.length > 0) {
+        const chipsContainer = document.createElement('div');
+        chipsContainer.className = 'chat-chips';
+        chips.forEach(chip => {
+            const btn = document.createElement('button');
+            const isPrimary = chip.action === 'create_task' || (chip.label && (chip.label.includes('Top') || chip.label.includes('Create') || chip.label.includes('Approve')));
+            btn.className = 'chat-chip' + (isPrimary ? ' chat-chip-primary' : '');
+            btn.innerText = chip.label || 'Action';
+            btn.onclick = () => {
+                if (chip.action === 'prompt_text') {
+                    sendChatPrompt(chip.text || chip.label);
+                } else if (chip.action === 'view_tasks') {
+                    const tasksTabBtn = document.querySelector('.tab-btn[data-tab="tasks"]') || document.querySelector('#tabsMenu button');
+                    if (tasksTabBtn) tasksTabBtn.click();
+                    toggleChatbot(false);
+                } else {
+                    executeChatAction(chip.action, chip.params, chip.label);
+                }
+            };
+            chipsContainer.appendChild(btn);
+        });
+        botDiv.appendChild(chipsContainer);
+    }
+
+    msgList.appendChild(botDiv);
+    msgList.scrollTop = msgList.scrollHeight;
+}
+
+async function executeChatAction(action, params = {}, actionLabel = '') {
+    const msgList = document.getElementById('chatMessageList');
+    if (!msgList) return;
+
+    // Display user action chip in chat
+    const userDiv = document.createElement('div');
+    userDiv.className = 'chat-msg user';
+    userDiv.innerText = actionLabel || action;
+    msgList.appendChild(userDiv);
+    msgList.scrollTop = msgList.scrollHeight;
+
+    // Loading bubble
+    const loadingDiv = document.createElement('div');
+    loadingDiv.className = 'chat-msg bot';
+    loadingDiv.id = 'chatActionLoading';
+    loadingDiv.innerText = 'Executing action...';
+    msgList.appendChild(loadingDiv);
+    msgList.scrollTop = msgList.scrollHeight;
+
+    try {
+        const res = await authFetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, ...params })
+        }).then(r => r.json());
+
+        loadingDiv.remove();
+
+        if (res.reply) {
+            appendBotMessage(res.reply, res.chips || []);
+        } else {
+            appendBotMessage(res.message || 'Action executed successfully.', res.chips || []);
+        }
+
+        // Live refresh main task grids and stats if task was created, assigned, or updated
+        if (action === 'create_task' || action === 'assign_task' || action === 'advance_status') {
+            if (typeof loadTasks === 'function') await loadTasks();
+            if (typeof updateTaskAnalyticsSummary === 'function') await updateTaskAnalyticsSummary();
+        }
+    } catch (err) {
+        loadingDiv.remove();
+        const errDiv = document.createElement('div');
+        errDiv.className = 'chat-msg bot';
+        errDiv.innerText = 'Network error executing action: ' + err.message;
+        msgList.appendChild(errDiv);
+        msgList.scrollTop = msgList.scrollHeight;
     }
 }
 
@@ -2386,7 +2488,7 @@ async function handleChatSubmit(e) {
     const loadingDiv = document.createElement('div');
     loadingDiv.className = 'chat-msg bot';
     loadingDiv.id = 'chatLoadingBubble';
-    loadingDiv.innerText = 'Searching records & Drive vault...';
+    loadingDiv.innerText = 'Searching records & analyzing workflow...';
     msgList.appendChild(loadingDiv);
     msgList.scrollTop = msgList.scrollHeight;
 
@@ -2399,23 +2501,17 @@ async function handleChatSubmit(e) {
 
         loadingDiv.remove();
 
-        const botDiv = document.createElement('div');
-        botDiv.className = 'chat-msg bot';
-
-        if (res.success && res.reply) {
-            let formatted = res.reply
-                .replace(/### (.*?)\n/g, '<div style="font-weight:700; color:var(--primary-color); margin:0.4rem 0 0.2rem;">$1</div>')
-                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\*(.*?)\*/g, '<em>$1</em>')
-                .replace(/`([^`]+)`/g, '<code style="background:#f1f5f9; padding:2px 4px; border-radius:4px; font-size:0.8rem;">$1</code>')
-                .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:var(--accent-color); text-decoration:underline;">$1</a>')
-                .replace(/\n/g, '<br>');
-            botDiv.innerHTML = formatted;
+        if (res.reply) {
+            appendBotMessage(res.reply, res.chips || []);
         } else {
-            botDiv.innerText = res.message || 'Sorry, could not process request.';
+            appendBotMessage(res.message || 'Sorry, could not process request.', res.chips || []);
         }
-        msgList.appendChild(botDiv);
-        msgList.scrollTop = msgList.scrollHeight;
+
+        // If a task action took place via natural language, refresh grids
+        if (res.task && typeof loadTasks === 'function') {
+            await loadTasks();
+            if (typeof updateTaskAnalyticsSummary === 'function') await updateTaskAnalyticsSummary();
+        }
     } catch (err) {
         loadingDiv.remove();
         const errDiv = document.createElement('div');

@@ -54,7 +54,7 @@
                 </div>
                 <div class="nav-controls">
                     <div class="user-info">User: <span id="displayUser" style="font-weight:700; color:#38bdf8;">-</span> (<span id="displayRole" style="text-transform: capitalize;">-</span>)</div>
-                    <button class="btn-change-pass" id="autoPilotNavBtn" style="background:#0284c7; color:#fff; border:none;" onclick="toggleAutoPipelineModal(true)">⚡ Auto-Pilot</button>
+                    <button class="btn-change-pass" id="chatbotNavBtn" style="background:#0284c7; color:#fff; border:none;" onclick="toggleChatbot(true)">💬 AI Assistant</button>
                     <button class="btn-change-pass" id="gdriveNavBtn" style="background:#10b981; color:#fff; border:none;" onclick="toggleGoogleDriveModal(true)">☁️ Drive Vault</button>
                     <button class="btn-change-pass" onclick="toggleSelfPasswordModal(true)">Change Password</button>
                     <button class="btn-logout" onclick="handleSecureSignout()">Logout</button>
@@ -708,8 +708,10 @@
         </div>
         <div class="chatbot-body" id="chatMessageList">
             <div class="chat-msg bot">
-                Hello! I can help you search client records, check task deadlines, query attendance, or look up documents in your Google Drive Vault.
+                Hello! I am your AI Office Workflow Assistant. I can help you conversantly create tasks, recommend top-matched staff, assign jobs, and advance task statuses.
                 <div class="chat-chips">
+                    <button class="chat-chip chat-chip-primary" onclick="sendChatPrompt('Create a new task')">➕ Create Task</button>
+                    <button class="chat-chip" onclick="sendChatPrompt('Recommend top staff')">⭐ Recommend Staff</button>
                     <button class="chat-chip" onclick="sendChatPrompt('Pending review tasks')">Pending Review</button>
                     <button class="chat-chip" onclick="sendChatPrompt('Who is present today?')">Today's Attendance</button>
                     <button class="chat-chip" onclick="sendChatPrompt('GST monthly returns status')">GST Returns</button>
