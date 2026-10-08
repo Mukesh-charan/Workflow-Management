@@ -8,6 +8,288 @@ function isGstWorkCheck(natureOfWork) {
   return str.includes('gst') || str.includes('cmp');
 }
 
+// =============================================================================
+// UNSTRUCTURED PARAGRAPH / SENTENCE PARAMETER EXTRACTOR
+// Extracts Client, Nature, AY, Due Date, Operator, Top-N recommendations, Status
+// in a single pass from natural language paragraphs or sentences.
+// =============================================================================
+function parseUnstructuredTaskParameters(text, allClients = [], allUsers = [], allEngagements = []) {
+  const tLower = text.toLowerCase();
+  const result = {
+    clientCode: '',
+    clientName: '',
+    natureOfWork: '',
+    assessmentYear: '',
+    dueDate: '',
+    operator: '',
+    assignToBest: false,
+    requestedN: null,
+    wantsRecommendation: false,
+    taskId: null,
+    targetStatus: null,
+    confidence: {
+      hasClient: false,
+      hasNature: false,
+      hasDueDate: false
+    }
+  };
+
+  // 1. Task ID extraction (e.g., "task #12345", "job 12345", "#1234567")
+  const taskIdMatch = text.match(/(?:task|job)\s*#?(\d{5,})/i) || text.match(/#(\d{5,})/);
+  if (taskIdMatch) {
+    result.taskId = parseInt(taskIdMatch[1]);
+  }
+
+  // 2. Client Extraction (ID, Name, PAN, GSTIN, or Phrased Name)
+  // 2a. Check by ID (e.g., "#101", "client 101", "client #101")
+  const idMatch = text.match(/(?:client\s*#?|id\s*#?)(\d{1,6})/i);
+  if (idMatch) {
+    const cId = parseInt(idMatch[1]);
+    const found = allClients.find(c => Number(c.id) === cId);
+    if (found) {
+      result.clientCode = String(found.id);
+      result.clientName = found.name;
+      result.confidence.hasClient = true;
+    }
+  }
+
+  // 2b. Match existing clients by name from DB
+  if (!result.clientCode) {
+    for (const c of allClients) {
+      const cNameClean = c.name.toLowerCase().trim();
+      if (cNameClean.length >= 3 && tLower.includes(cNameClean)) {
+        result.clientCode = String(c.id);
+        result.clientName = c.name;
+        result.confidence.hasClient = true;
+        break;
+      }
+    }
+  }
+
+  // 2c. Substring / phrase match (e.g. "for client Ramesh & Sons", "for Alpha Corp", "client: TCS")
+  if (!result.clientCode) {
+    const phraseMatch = text.match(/(?:for client|for|client:)\s+([a-zA-Z0-9\s&.,'-]+?)(?:\s+(?:for|due|ay|period|with|and|recommend|assign|status|to)|$)/i);
+    if (phraseMatch) {
+      const candidateName = phraseMatch[1].trim();
+      if (candidateName.length >= 2 && !['task', 'the', 'a', 'an', 'gst', 'it', 'tds'].includes(candidateName.toLowerCase())) {
+        const fuzzy = allClients.find(c => c.name.toLowerCase().includes(candidateName.toLowerCase()) || candidateName.toLowerCase().includes(c.name.toLowerCase()));
+        if (fuzzy) {
+          result.clientCode = String(fuzzy.id);
+          result.clientName = fuzzy.name;
+        } else {
+          result.clientCode = String(Date.now()).slice(-5);
+          result.clientName = candidateName;
+        }
+        result.confidence.hasClient = true;
+      }
+    }
+  }
+
+  // 3. Nature of Work Extraction
+  if (tLower.includes('tax audit') || tLower.includes('3cd') || tLower.includes('44ab')) {
+    result.natureOfWork = 'Tax Audit (3CD)';
+    result.confidence.hasNature = true;
+  } else if (tLower.includes('statutory audit') || tLower.includes('company audit')) {
+    result.natureOfWork = 'Statutory Audit';
+    result.confidence.hasNature = true;
+  } else if (tLower.includes('gstr 3b') || tLower.includes('gstr3b')) {
+    result.natureOfWork = 'GSTR 3B';
+    result.confidence.hasNature = true;
+  } else if (tLower.includes('gstr 1') || tLower.includes('gstr1')) {
+    result.natureOfWork = 'GSTR 1';
+    result.confidence.hasNature = true;
+  } else if (tLower.includes('gstr 4') || tLower.includes('cmp 8') || tLower.includes('cmp-8')) {
+    result.natureOfWork = 'GSTR 4';
+    result.confidence.hasNature = true;
+  } else if (tLower.includes('gst annual') || tLower.includes('9/9c') || tLower.includes('gstr 9')) {
+    result.natureOfWork = 'GST Annual Return (9/9C)';
+    result.confidence.hasNature = true;
+  } else if (tLower.includes('gst monthly') || tLower.includes('gst return') || tLower.includes('gst filing') || tLower.includes('gst')) {
+    result.natureOfWork = 'GST Monthly Return';
+    result.confidence.hasNature = true;
+  } else if (tLower.includes('tds') || tLower.includes('26q') || tLower.includes('24q')) {
+    result.natureOfWork = 'TDS Quarterly Filing';
+    result.confidence.hasNature = true;
+  } else if (tLower.includes('roc') || tLower.includes('mca') || tLower.includes('aoc-4')) {
+    result.natureOfWork = 'ROC Filing';
+    result.confidence.hasNature = true;
+  } else if (tLower.includes('it return') || tLower.includes('itr') || tLower.includes('income tax')) {
+    result.natureOfWork = 'IT Return';
+    result.confidence.hasNature = true;
+  } else {
+    // Check against engagement titles from DB
+    for (const eng of allEngagements) {
+      if (tLower.includes(eng.toLowerCase())) {
+        result.natureOfWork = eng;
+        result.confidence.hasNature = true;
+        break;
+      }
+    }
+  }
+
+  // Default nature if missing but creation intended
+  if (!result.natureOfWork) {
+    if (tLower.includes('tax')) result.natureOfWork = 'IT Return';
+    else if (tLower.includes('audit')) result.natureOfWork = 'Statutory Audit';
+    else result.natureOfWork = 'GST Monthly Return';
+  }
+
+  // 4. Assessment Year / Period Extraction
+  const ayMatch = text.match(/(?:ay|assessment year|period|fy|financial year)\s*[:=]?\s*([0-9]{4}[-/][0-9]{2,4}|[0-9]{4}-[0-9]{2})/i) ||
+                  text.match(/\b(20[2-3][0-9]-[2-3][0-9])\b/);
+  if (ayMatch) {
+    result.assessmentYear = ayMatch[1].trim();
+  } else {
+    // Month + Year period (e.g. "October 2026", "Oct 2026")
+    const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december',
+                        'jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+    for (let m = 0; m < monthNames.length; m++) {
+      const mStr = monthNames[m];
+      const pMatch = text.match(new RegExp(`(?:period|month|for)\\s+${mStr}\\s*(\\d{4})?`, 'i'));
+      if (pMatch) {
+        const yr = pMatch[1] || new Date().getFullYear();
+        const mNum = String((m % 12) + 1).padStart(2, '0');
+        result.assessmentYear = `${yr}-${mNum}`;
+        break;
+      }
+    }
+  }
+
+  // If GST work, clear assessment year per repo rule
+  if (isGstWorkCheck(result.natureOfWork)) {
+    result.assessmentYear = '';
+  } else if (!result.assessmentYear) {
+    const now = new Date();
+    const currYear = now.getFullYear();
+    result.assessmentYear = `${currYear}-${(currYear + 1).toString().slice(-2)}`;
+  }
+
+  // 5. Due Date Extraction
+  const now = new Date();
+  const currYear = now.getFullYear();
+  const currMonth = String(now.getMonth() + 1).padStart(2, '0');
+
+  // 5a. ISO format YYYY-MM-DD
+  const isoDateMatch = text.match(/\b(20[2-3][0-9]-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01]))\b/);
+  if (isoDateMatch) {
+    result.dueDate = isoDateMatch[1];
+    result.confidence.hasDueDate = true;
+  }
+
+  // 5b. DD-MM-YYYY or DD/MM/YYYY
+  if (!result.dueDate) {
+    const indianDateMatch = text.match(/\b(0?[1-9]|[12][0-9]|3[01])[/-](0?[1-9]|1[0-2])[/-](20[2-3][0-9])\b/);
+    if (indianDateMatch) {
+      const d = String(indianDateMatch[1]).padStart(2, '0');
+      const m = String(indianDateMatch[2]).padStart(2, '0');
+      const y = indianDateMatch[3];
+      result.dueDate = `${y}-${m}-${d}`;
+      result.confidence.hasDueDate = true;
+    }
+  }
+
+  // 5c. "20th November", "20 November", "Nov 20", "20th"
+  if (!result.dueDate) {
+    const monthNames = {
+      jan: '01', january: '01', feb: '02', february: '02', mar: '03', march: '03',
+      apr: '04', april: '04', may: '05', jun: '06', june: '06', jul: '07', july: '07',
+      aug: '08', august: '08', sep: '09', september: '09', oct: '10', october: '10',
+      nov: '11', november: '11', dec: '12', december: '12'
+    };
+    const dayMonthMatch = text.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]{3,9})(?:\s+(\d{4}))?\b/i) ||
+                          text.match(/\b([a-zA-Z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+(\d{4}))?\b/i);
+    if (dayMonthMatch) {
+      let dayPart = parseInt(dayMonthMatch[1]) || parseInt(dayMonthMatch[2]);
+      let monthPart = (dayMonthMatch[1] && isNaN(dayMonthMatch[1])) ? dayMonthMatch[1].toLowerCase() : dayMonthMatch[2].toLowerCase();
+      let yearPart = dayMonthMatch[3] ? parseInt(dayMonthMatch[3]) : currYear;
+
+      if (monthNames[monthPart]) {
+        result.dueDate = `${yearPart}-${monthNames[monthPart]}-${String(dayPart).padStart(2, '0')}`;
+        result.confidence.hasDueDate = true;
+      }
+    }
+  }
+
+  // 5d. Relative terms: "tomorrow", "next week", "next month", "in X days"
+  if (!result.dueDate) {
+    if (tLower.includes('tomorrow')) {
+      const target = new Date(now.getTime() + 86400000);
+      result.dueDate = target.toISOString().split('T')[0];
+      result.confidence.hasDueDate = true;
+    } else if (tLower.includes('next week')) {
+      const target = new Date(now.getTime() + 7 * 86400000);
+      result.dueDate = target.toISOString().split('T')[0];
+      result.confidence.hasDueDate = true;
+    } else if (tLower.includes('next month')) {
+      const target = new Date(now.getTime() + 30 * 86400000);
+      result.dueDate = target.toISOString().split('T')[0];
+      result.confidence.hasDueDate = true;
+    } else {
+      const inDaysMatch = text.match(/in\s+(\d+)\s*days/i);
+      if (inDaysMatch) {
+        const days = parseInt(inDaysMatch[1]);
+        const target = new Date(now.getTime() + days * 86400000);
+        result.dueDate = target.toISOString().split('T')[0];
+        result.confidence.hasDueDate = true;
+      }
+    }
+  }
+
+  // 5e. Smart statutory fallback
+  if (!result.dueDate) {
+    if (result.natureOfWork.includes('GST')) {
+      result.dueDate = `${currYear}-${currMonth}-20`;
+    } else if (result.natureOfWork.includes('Audit')) {
+      result.dueDate = `${currYear}-10-31`;
+    } else {
+      const target = new Date(now.getTime() + 30 * 86400000);
+      result.dueDate = target.toISOString().split('T')[0];
+    }
+  }
+
+  // 6. Operator / Assignment Extraction
+  if (tLower.includes('assign to best') || tLower.includes('assign to top 1') || tLower.includes('assign to top staff') || tLower.includes('assign best')) {
+    result.assignToBest = true;
+  } else {
+    const opMatch = text.match(/(?:assign(?:\s+task)?\s+to|allocate\s+to|operator\s*[:=]|give\s+(?:it\s+)?to)\s*@?([a-zA-Z0-9_]+)/i);
+    if (opMatch) {
+      const candOp = opMatch[1].trim().toLowerCase();
+      if (!['top', 'best', 'the', 'a', 'task', 'staff'].includes(candOp)) {
+        const userExists = allUsers.find(u => u.username.toLowerCase() === candOp);
+        if (userExists) {
+          result.operator = userExists.username.toLowerCase();
+        } else {
+          result.operator = candOp;
+        }
+      }
+    }
+  }
+
+  // 7. Top-N Recommendations Extraction
+  const nMatch = text.match(/(?:top|recommend|suggest)\s*(\d+)/i) ||
+                 text.match(/(\d+)\s*(?:staff|candidates|recommendations|members|operators)/i);
+  if (nMatch) {
+    result.requestedN = parseInt(nMatch[1]);
+    result.wantsRecommendation = true;
+  } else if (tLower.includes('recommend') || tLower.includes('suggest staff') || tLower.includes('best staff') || tLower.includes('who should do')) {
+    result.requestedN = 3; // Default to top 3 without asking
+    result.wantsRecommendation = true;
+  }
+
+  // 8. Status Progression Intent Extraction
+  if (tLower.includes('approve') || tLower.includes('approved')) {
+    result.targetStatus = 'Approved';
+  } else if (tLower.includes('file') || tLower.includes('mark filed') || tLower.includes('mark as filed')) {
+    result.targetStatus = 'Filed';
+  } else if (tLower.includes('review') || tLower.includes('pending review') || tLower.includes('submit for review')) {
+    result.targetStatus = 'Pending Review';
+  } else if (tLower.includes('reject') || tLower.includes('send back') || tLower.includes('rework') || tLower.includes('correction')) {
+    result.targetStatus = 'Rework';
+  }
+
+  return result;
+}
+
 module.exports = async (req, res) => {
   try {
     const decoded = verifyToken(req);
@@ -42,6 +324,7 @@ module.exports = async (req, res) => {
     const tasksCol = db.collection('tasks');
     const attendanceCol = db.collection('attendance');
     const usersCol = db.collection('users');
+    const engagementsCol = db.collection('engagements');
 
     // =========================================================================
     // EXPLICIT ACTION HANDLERS (Invoked by UI buttons or structured chatbot cards)
@@ -195,7 +478,6 @@ module.exports = async (req, res) => {
       if (taskId) {
         targetTask = await tasksCol.findOne({ id: parseInt(taskId) });
       } else if (clientCode && natureOfWork) {
-        // Find most recent unassigned task for this client & nature
         targetTask = await tasksCol.findOne({
           clientCode: String(clientCode),
           natureOfWork: String(natureOfWork),
@@ -254,9 +536,7 @@ module.exports = async (req, res) => {
       }
 
       let nextStatus = targetStatus;
-      let reworkIncrement = 0;
 
-      // Determine next status if not explicitly given
       if (!nextStatus) {
         switch (existingTask.currentStatus) {
           case 'Unassigned':
@@ -287,7 +567,6 @@ module.exports = async (req, res) => {
         }
       }
 
-      // Check permissions: only partner can approve/reject
       if (nextStatus === 'Approved' && !isAdmin) {
         return res.status(403).json({ success: false, message: 'Only Partners can approve tasks.' });
       }
@@ -295,7 +574,6 @@ module.exports = async (req, res) => {
       let updateDoc = { currentStatus: nextStatus };
       if (targetStatus === 'Reject' || targetStatus === 'Rework') {
         nextStatus = 'Assigned';
-        reworkIncrement = 1;
         updateDoc = {
           currentStatus: 'Assigned',
           sendBackCount: (existingTask.sendBackCount || 0) + 1
@@ -338,126 +616,232 @@ module.exports = async (req, res) => {
     }
 
     // =========================================================================
-    // NATURAL LANGUAGE CONVERSATIONAL PARSING
+    // NATURAL LANGUAGE CONVERSATIONAL PROCESSING (ONE-SHOT UNSTRUCTURED PARSING)
     // =========================================================================
 
-    // A. Detect Status Progression Intent (e.g., "approve task 123", "mark task 456 as filed", "proceed status task 789")
-    const statusMatch = query.match(/(?:proceed|advance|approve|reject|send\s*back|file|mark\s*filed)\s*(?:task|job)?\s*#?(\d+)/i) ||
-                        query.match(/(?:task|job)\s*#?(\d+)\s*(?:status|proceed|approve|file|reject)/i);
-    if (statusMatch && (queryLower.includes('approve') || queryLower.includes('file') || queryLower.includes('reject') || queryLower.includes('proceed') || queryLower.includes('advance') || queryLower.includes('status'))) {
-      const targetId = parseInt(statusMatch[1]);
-      const matchedTask = await tasksCol.findOne({ id: targetId });
-      if (matchedTask) {
-        let desiredStatus = null;
-        if (queryLower.includes('approve')) desiredStatus = 'Approved';
-        else if (queryLower.includes('reject') || queryLower.includes('send back') || queryLower.includes('correction')) desiredStatus = 'Rework';
-        else if (queryLower.includes('file')) desiredStatus = 'Filed';
-        else if (queryLower.includes('review')) desiredStatus = 'Pending Review';
+    const allClients = await clientsCol.find({ status: { $ne: 'Inactive' } }).limit(500).toArray();
+    const allUsers = await usersCol.find({}).toArray();
+    const allEngagements = (await engagementsCol.find({}).toArray()).map(e => e.title);
 
-        let promptText = `Found **Task #${matchedTask.id}** for **${matchedTask.clientName}**.\n- Nature: *${matchedTask.natureOfWork}*\n- Current Status: **${matchedTask.currentStatus}**\n- Assigned to: **@${matchedTask.workTakenBy || 'Unassigned'}**\n\n`;
+    // Extract all parameters in one pass from unstructured paragraph/sentence
+    const parsed = parseUnstructuredTaskParameters(query, allClients, allUsers, allEngagements);
 
-        const chips = [];
-        if (matchedTask.currentStatus === 'Unassigned') {
-          promptText += `Please assign staff to proceed.`;
-          chips.push({ label: '⭐ Recommend Top 3 Staff', action: 'recommend_staff', params: { taskId: matchedTask.id, clientCode: matchedTask.clientCode, natureOfWork: matchedTask.natureOfWork, limit: 3 } });
-        } else if (matchedTask.currentStatus === 'Assigned') {
-          promptText += `Advance work status:`;
-          chips.push({ label: '⏩ Submit for Review', action: 'advance_status', params: { taskId: matchedTask.id, targetStatus: 'Pending Review' } });
-        } else if (matchedTask.currentStatus === 'Pending Review' && isAdmin) {
-          promptText += `Take partner review action:`;
-          chips.push({ label: '✅ Approve Task', action: 'advance_status', params: { taskId: matchedTask.id, targetStatus: 'Approved' } });
-          chips.push({ label: '❌ Send Back (Rework)', action: 'advance_status', params: { taskId: matchedTask.id, targetStatus: 'Rework' } });
-        } else if (matchedTask.currentStatus === 'Approved') {
-          promptText += `Ready to file:`;
-          chips.push({ label: '🏛️ Mark as Filed', action: 'advance_status', params: { taskId: matchedTask.id, targetStatus: 'Filed' } });
-        } else if (matchedTask.currentStatus === 'Filed') {
-          promptText += `Task is completed and archived.`;
+    const isTaskCreationOrIntent = queryLower.includes('create task') ||
+                                   queryLower.includes('new task') ||
+                                   queryLower.includes('add task') ||
+                                   queryLower.includes('register task') ||
+                                   queryLower.includes('inward task') ||
+                                   queryLower.includes('create a task') ||
+                                   queryLower.startsWith('create ') ||
+                                   queryLower.startsWith('register ') ||
+                                   (parsed.confidence.hasClient && (parsed.confidence.hasNature || queryLower.includes('task')));
+
+    // Case 1: Status Progression Intent on existing task
+    if (parsed.taskId && parsed.targetStatus) {
+      const existingTask = await tasksCol.findOne({ id: parsed.taskId });
+      if (existingTask) {
+        let updateDoc = { currentStatus: parsed.targetStatus };
+        if (parsed.targetStatus === 'Rework') {
+          updateDoc = { currentStatus: 'Assigned', sendBackCount: (existingTask.sendBackCount || 0) + 1 };
         }
+        await tasksCol.updateOne({ id: parsed.taskId }, { $set: updateDoc });
+        const updated = await tasksCol.findOne({ id: parsed.taskId });
+
+        await logAuditAction(db, decoded.username, 'STATUS_CHANGE_NL', {
+          taskId: parsed.taskId,
+          status: updated.currentStatus
+        });
 
         return res.status(200).json({
           success: true,
-          reply: promptText,
-          task: matchedTask,
-          chips
-        });
-      }
-    }
-
-    // B. Detect Assignment Intent (e.g., "assign task 123 to rahul", "assign to @ramesh")
-    const assignMatch = query.match(/assign\s*(?:task\s*#?(\d+))?\s*(?:to\s*@?([a-zA-Z0-9_]+))/i) ||
-                        query.match(/allocate\s*(?:task\s*#?(\d+))?\s*(?:to\s*@?([a-zA-Z0-9_]+))/i);
-    if (assignMatch && isAdmin) {
-      const tId = assignMatch[1] ? parseInt(assignMatch[1]) : null;
-      const targetOp = assignMatch[2] ? assignMatch[2].toLowerCase() : '';
-
-      if (targetOp) {
-        const staffUser = await usersCol.findOne({ username: targetOp });
-        if (staffUser) {
-          let chosenTask = null;
-          if (tId) chosenTask = await tasksCol.findOne({ id: tId });
-          else chosenTask = await tasksCol.findOne({ currentStatus: 'Unassigned' });
-
-          if (chosenTask) {
-            const todayStr = new Date().toISOString().split('T')[0];
-            await tasksCol.updateOne({ id: chosenTask.id }, { $set: { workTakenBy: targetOp, workTakenOn: todayStr, currentStatus: 'Assigned' } });
-            const updated = await tasksCol.findOne({ id: chosenTask.id });
-
-            return res.status(200).json({
-              success: true,
-              reply: `✅ **Task #${updated.id} Assigned to ${staffUser.name} (@${targetOp})**\n- Client: **${updated.clientName}**\n- Nature: *${updated.natureOfWork}*\n- Status: **Assigned**\n\nNext step: operator prepares filing and submits for review.`,
-              task: updated,
-              chips: [
-                { label: '⏩ Advance to Pending Review', action: 'advance_status', params: { taskId: updated.id, targetStatus: 'Pending Review' } }
-              ]
-            });
-          }
-        }
-      }
-    }
-
-    // C. Detect Staff Recommendation Intent (e.g., "recommend top 3 staff", "recommend 5 staff", "suggest staff")
-    const isRecommendQuery = queryLower.includes('recommend') || queryLower.includes('suggest staff') || queryLower.includes('best staff') || queryLower.includes('who should do');
-    if (isRecommendQuery) {
-      // Extract N (Top N)
-      const numMatch = query.match(/(?:top|recommend|suggest)\s*(\d+)/i) || query.match(/(\d+)\s*(?:staff|candidates|operators|members)/i);
-      let requestedN = numMatch ? parseInt(numMatch[1]) : null;
-
-      // Check if client / task context is present in query
-      let matchedClientForRec = null;
-      const clientKeywords = query.replace(/(?:recommend|suggest|top|\d+|staff|candidates|for|doing|task|the)/gi, '').trim();
-      if (clientKeywords.length >= 2) {
-        matchedClientForRec = await clientsCol.findOne({
-          $or: [
-            { name: { $regex: clientKeywords, $options: 'i' } },
-            { id: isNaN(clientKeywords) ? -999999 : Number(clientKeywords) }
-          ]
-        });
-      }
-
-      if (!requestedN) {
-        // Ask Admin explicitly for N input as requested by user
-        return res.status(200).json({
-          success: true,
-          reply: `🤖 **Staff Allocation Intelligence**\n\nHow many top staff recommendations would you like to see for this task?\n\nSelect an option below or type e.g. *"Recommend top 4 staff"*:`,
+          reply: `🔄 **Task #${updated.id} Status Updated to "${updated.currentStatus}"**\n- **Client**: ${updated.clientName}\n- **Nature**: ${updated.natureOfWork}\n- **Operator**: @${updated.workTakenBy || 'Unassigned'}`,
+          task: updated,
           chips: [
-            { label: '⭐ Top 3 Staff', action: 'recommend_staff', params: { clientCode: matchedClientForRec ? String(matchedClientForRec.id) : '', limit: 3 } },
-            { label: '⭐ Top 5 Staff', action: 'recommend_staff', params: { clientCode: matchedClientForRec ? String(matchedClientForRec.id) : '', limit: 5 } },
-            { label: '⭐ Top 10 Staff', action: 'recommend_staff', params: { clientCode: matchedClientForRec ? String(matchedClientForRec.id) : '', limit: 10 } }
+            { label: '⏩ Advance Status', action: 'advance_status', params: { taskId: updated.id } },
+            { label: '📋 View All Tasks', action: 'view_tasks', params: {} }
+          ]
+        });
+      }
+    }
+
+    // Case 2: Assignment Intent on existing task or inferred task
+    if (parsed.operator && (queryLower.includes('assign') || queryLower.includes('allocate')) && !isTaskCreationOrIntent) {
+      let targetTask = null;
+      if (parsed.taskId) {
+        targetTask = await tasksCol.findOne({ id: parsed.taskId });
+      } else if (parsed.clientCode) {
+        targetTask = await tasksCol.findOne({ clientCode: parsed.clientCode, currentStatus: { $in: ['Unassigned', 'Assigned'] } });
+      }
+
+      if (targetTask) {
+        const todayStr = new Date().toISOString().split('T')[0];
+        await tasksCol.updateOne({ id: targetTask.id }, { $set: { workTakenBy: parsed.operator, workTakenOn: todayStr, currentStatus: 'Assigned' } });
+        const updated = await tasksCol.findOne({ id: targetTask.id });
+
+        return res.status(200).json({
+          success: true,
+          reply: `✅ **Task #${updated.id} Assigned to @${parsed.operator}**\n- **Client**: ${updated.clientName}\n- **Nature**: ${updated.natureOfWork}\n- **Current Status**: **Assigned**`,
+          task: updated,
+          chips: [
+            { label: '⏩ Advance to Pending Review', action: 'advance_status', params: { taskId: updated.id, targetStatus: 'Pending Review' } }
+          ]
+        });
+      }
+    }
+
+    // Case 3: ONE-SHOT TASK CREATION & ALLOCATION FROM UNSTRUCTURED PARAGRAPH
+    if (isTaskCreationOrIntent && isAdmin) {
+      // If client couldn't be extracted, pick first matching or show structured prompt
+      if (!parsed.clientName) {
+        parsed.clientName = 'Client (Pending Name)';
+        parsed.clientCode = String(Date.now()).slice(-5);
+      }
+
+      const clientCodeClean = parsed.clientCode || String(Date.now()).slice(-5);
+      const clientNameClean = parsed.clientName;
+      const natureClean = parsed.natureOfWork || 'GST Monthly Return';
+      const isGst = isGstWorkCheck(natureClean);
+      const ayClean = isGst ? '' : (parsed.assessmentYear || '');
+      const dueDateClean = parsed.dueDate;
+
+      // Duplicate check
+      const dupQuery = {
+        clientCode: clientCodeClean,
+        natureOfWork: natureClean,
+        currentStatus: { $ne: 'Filed' }
+      };
+      if (ayClean) dupQuery.assessmentYear = ayClean;
+      const existingTask = await tasksCol.findOne(dupQuery);
+
+      if (existingTask) {
+        return res.status(200).json({
+          success: false,
+          reply: `⚠️ **Active Task Already Exists**\n\nTask **#${existingTask.id}** for **${clientNameClean}** (${natureClean}) is already active in status **${existingTask.currentStatus}** (Assigned: @${existingTask.workTakenBy || 'Unassigned'}).`,
+          task: existingTask,
+          chips: [
+            { label: `⚙️ Manage Task #${existingTask.id}`, action: 'prompt_text', text: `Proceed status of task #${existingTask.id}` },
+            { label: '⭐ Recommend Staff', action: 'recommend_staff', params: { taskId: existingTask.id, clientCode: clientCodeClean, natureOfWork: natureClean, limit: 3 } }
           ]
         });
       }
 
-      const recs = await computeRecommendations(db, {
-        clientCode: matchedClientForRec ? String(matchedClientForRec.id) : '',
-        natureOfWork: queryLower.includes('gst') ? 'GST Monthly Return' : (queryLower.includes('it') ? 'IT Return' : ''),
-        limit: requestedN
+      // Compute Top-N Recommendations if requested or if user wanted auto-assign
+      let topCandidates = [];
+      let assignedOperator = parsed.operator || '';
+
+      const recLimit = parsed.requestedN || 3;
+      topCandidates = await computeRecommendations(db, {
+        clientCode: clientCodeClean,
+        natureOfWork: natureClean,
+        limit: recLimit
       });
 
-      let replyMsg = `### 🎯 Top ${recs.length} Recommended Staff\n`;
+      // If user said "assign to top 1" or "assign to best", pick #1 scored candidate!
+      if (parsed.assignToBest && topCandidates.length > 0) {
+        assignedOperator = topCandidates[0].username;
+      }
+
+      // If user specified an operator that exists in top candidates
+      const nowStr = new Date().toISOString().split('T')[0];
+      const initialStatus = assignedOperator ? (parsed.targetStatus === 'Pending Review' ? 'Pending Review' : 'Assigned') : 'Unassigned';
+
+      const newTask = {
+        id: Date.now(),
+        clientCode: clientCodeClean,
+        clientName: clientNameClean,
+        natureOfWork: natureClean,
+        assessmentYear: ayClean,
+        dateReceived: nowStr,
+        dueDate: dueDateClean,
+        currentStatus: initialStatus,
+        workTakenBy: assignedOperator,
+        workTakenOn: assignedOperator ? nowStr : '',
+        sendBackCount: 0,
+        reasonForPending: ''
+      };
+
+      await tasksCol.insertOne(newTask);
+      await logAuditAction(db, decoded.username, 'CREATE_TASK_ONE_SHOT', {
+        taskId: newTask.id,
+        clientName: newTask.clientName,
+        natureOfWork: newTask.natureOfWork,
+        operator: newTask.workTakenBy,
+        sourceText: query
+      });
+
+      // Build Rich Markdown Response with Extracted Structured Parameters
+      let replyMsg = `### 📋 Task Created Successfully (#${newTask.id})\n\n`;
+      replyMsg += `**Structured Parameters Extracted:**\n`;
+      replyMsg += `- 🏢 **Client**: [#${newTask.clientCode}] **${newTask.clientName}**\n`;
+      replyMsg += `- 📂 **Nature of Work**: **${newTask.natureOfWork}**\n`;
+      if (newTask.assessmentYear) {
+        replyMsg += `- 📅 **Assessment Year**: \`${newTask.assessmentYear}\`\n`;
+      }
+      replyMsg += `- ⏰ **Due Date**: \`${newTask.dueDate}\`\n`;
+      replyMsg += `- 🚦 **Current Status**: **${newTask.currentStatus}**\n`;
+      if (assignedOperator) {
+        replyMsg += `- 👤 **Assigned Operator**: **@${assignedOperator}**\n`;
+      } else {
+        replyMsg += `- 👤 **Assigned Operator**: *Unassigned*\n`;
+      }
+      replyMsg += `\n`;
+
+      const chips = [];
+
+      // Append Top-N Recommendations evaluation
+      if (topCandidates.length > 0) {
+        replyMsg += `### 🎯 Top ${topCandidates.length} Matched Staff Evaluation:\n`;
+        topCandidates.forEach((r, idx) => {
+          const attBadge = r.attendanceStatus === 'Present' ? '🟢 Present' : (r.attendanceStatus === 'Absent' ? '🔴 Absent' : '⚪ ' + r.attendanceStatus);
+          const isSelected = r.username.toLowerCase() === assignedOperator.toLowerCase();
+          replyMsg += `**${idx + 1}. ${r.name}** (@${r.username}) — **${r.score}% Match** [${attBadge}] ${isSelected ? '✅ *(Assigned)*' : ''}\n`;
+          replyMsg += `  - *Role*: ${r.role} | *Active Queue*: ${r.activeTasks} task(s)\n`;
+          if (r.reasons && r.reasons.length > 0) {
+            replyMsg += `  - *Why*: ${r.reasons.join(', ')}\n`;
+          }
+          replyMsg += `\n`;
+
+          if (!assignedOperator) {
+            chips.push({
+              label: `Assign @${r.username} (${r.score}%)`,
+              action: 'assign_task',
+              params: { taskId: newTask.id, operator: r.username, clientCode: newTask.clientCode, natureOfWork: newTask.natureOfWork }
+            });
+          }
+        });
+      }
+
+      if (assignedOperator) {
+        chips.push({ label: '⏩ Advance to Pending Review', action: 'advance_status', params: { taskId: newTask.id, targetStatus: 'Pending Review' } });
+        chips.push({ label: '✅ Approve Task', action: 'advance_status', params: { taskId: newTask.id, targetStatus: 'Approved' } });
+      }
+
+      return res.status(200).json({
+        success: true,
+        reply: replyMsg,
+        task: newTask,
+        chips
+      });
+    }
+
+    // Case 4: Standalone Recommendation Intent (e.g., "recommend top 5 staff for GST return")
+    if (parsed.wantsRecommendation) {
+      const recLimit = parsed.requestedN || 3;
+      const recs = await computeRecommendations(db, {
+        clientCode: parsed.clientCode || '',
+        natureOfWork: parsed.natureOfWork || '',
+        limit: recLimit
+      });
+
+      let replyMsg = `### 🎯 Top ${recs.length} Recommended Staff:\n`;
+      if (parsed.natureOfWork || parsed.clientName) {
+        replyMsg += `*(Target: **${parsed.natureOfWork || 'General Tax'}** | Client: **${parsed.clientName || 'General'}**)*\n\n`;
+      }
+
       recs.forEach((r, idx) => {
         const attBadge = r.attendanceStatus === 'Present' ? '🟢 Present' : (r.attendanceStatus === 'Absent' ? '🔴 Absent' : '⚪ ' + r.attendanceStatus);
         replyMsg += `**${idx + 1}. ${r.name}** (@${r.username}) — **${r.score}% Match** [${attBadge}]\n`;
-        replyMsg += `  - *Role*: ${r.role} | *Active load*: ${r.activeTasks} task(s)\n`;
+        replyMsg += `  - *Load*: ${r.activeTasks} task(s) | *Role*: ${r.role}\n`;
         if (r.reasons && r.reasons.length > 0) {
           replyMsg += `  - *Highlights*: ${r.reasons.join(', ')}\n`;
         }
@@ -465,9 +849,16 @@ module.exports = async (req, res) => {
       });
 
       const chips = recs.map(r => ({
-        label: `Assign to @${r.username}`,
-        action: 'assign_task',
-        params: { operator: r.username, clientCode: matchedClientForRec ? String(matchedClientForRec.id) : '' }
+        label: `Create & Assign @${r.username}`,
+        action: 'create_task',
+        params: {
+          clientCode: parsed.clientCode || String(Date.now()).slice(-5),
+          clientName: parsed.clientName || 'General Client',
+          natureOfWork: parsed.natureOfWork || 'GST Monthly Return',
+          assessmentYear: parsed.assessmentYear || '',
+          dueDate: parsed.dueDate,
+          operator: r.username
+        }
       }));
 
       return res.status(200).json({
@@ -478,115 +869,8 @@ module.exports = async (req, res) => {
       });
     }
 
-    // D. Detect Task Creation Intent (e.g., "create task for Ramesh", "new task", "create a task")
-    const isCreateIntent = queryLower.includes('create task') ||
-                          queryLower.includes('new task') ||
-                          queryLower.includes('add task') ||
-                          queryLower.includes('register task') ||
-                          queryLower.includes('create a task') ||
-                          queryLower.startsWith('create ') ||
-                          queryLower.startsWith('inward ');
-
-    if (isCreateIntent && isAdmin) {
-      // 1. Try to find client from query
-      let matchedClient = null;
-      const allClients = await clientsCol.find({ status: { $ne: 'Inactive' } }).limit(200).toArray();
-      for (const c of allClients) {
-        if (queryLower.includes(c.name.toLowerCase()) || query.includes(String(c.id))) {
-          matchedClient = c;
-          break;
-        }
-      }
-
-      // 2. Try to identify nature of work
-      let nature = '';
-      if (queryLower.includes('gst monthly') || queryLower.includes('gstr') || queryLower.includes('gst return') || queryLower.includes('gst')) {
-        nature = 'GST Monthly Return';
-      } else if (queryLower.includes('it return') || queryLower.includes('itr') || queryLower.includes('income tax')) {
-        nature = 'IT Return';
-      } else if (queryLower.includes('tax audit') || queryLower.includes('audit')) {
-        nature = 'Tax Audit';
-      } else if (queryLower.includes('tds')) {
-        nature = 'TDS Return';
-      } else if (queryLower.includes('roc') || queryLower.includes('mca')) {
-        nature = 'ROC Filing';
-      }
-
-      // If client is missing, ask Admin for client
-      if (!matchedClient) {
-        const top5Clients = allClients.slice(0, 5);
-        const clientChips = top5Clients.map(c => ({
-          label: `#${c.id} ${c.name}`,
-          action: 'prompt_text',
-          text: `Create task for ${c.name} (#${c.id})`
-        }));
-
-        return res.status(200).json({
-          success: true,
-          reply: `📋 **Create New Task — Step 1: Select Client**\n\nWhich client is this task for? Please type the Client Name or Client Code (e.g., *"Create task for Ramesh"*), or pick from active clients below:`,
-          chips: clientChips
-        });
-      }
-
-      // If nature is missing, ask Admin for nature of work
-      if (!nature) {
-        return res.status(200).json({
-          success: true,
-          reply: `📋 **Create Task for [${matchedClient.id}] ${matchedClient.name}**\n\nWhat is the Nature of Work for this task?`,
-          chips: [
-            { label: 'GST Monthly Return', action: 'prompt_text', text: `Create GST Monthly Return for ${matchedClient.name} (#${matchedClient.id})` },
-            { label: 'IT Return', action: 'prompt_text', text: `Create IT Return for ${matchedClient.name} (#${matchedClient.id})` },
-            { label: 'Tax Audit', action: 'prompt_text', text: `Create Tax Audit for ${matchedClient.name} (#${matchedClient.id})` },
-            { label: 'TDS Return', action: 'prompt_text', text: `Create TDS Return for ${matchedClient.name} (#${matchedClient.id})` }
-          ]
-        });
-      }
-
-      // Calculate sensible defaults
-      const now = new Date();
-      const currentYear = now.getFullYear();
-      const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
-      const defaultAY = `${currentYear}-${(currentYear + 1).toString().slice(-2)}`;
-      const defaultDueDate = nature.includes('GST') ? `${currentYear}-${currentMonth}-20` : `${currentYear}-10-31`;
-
-      const draftTask = {
-        clientCode: String(matchedClient.id),
-        clientName: matchedClient.name,
-        natureOfWork: nature,
-        assessmentYear: isGstWorkCheck(nature) ? '' : defaultAY,
-        dueDate: defaultDueDate
-      };
-
-      const replyMsg = `📝 **Draft Task Prepared**:\n- **Client**: [#${draftTask.clientCode}] **${draftTask.clientName}**\n- **Nature of Work**: **${draftTask.natureOfWork}**\n- **Period / AY**: \`${draftTask.assessmentYear || 'Current Period'}\`\n- **Due Date**: \`${draftTask.dueDate}\`\n\nHow would you like to proceed?`;
-
-      const chips = [
-        {
-          label: '⭐ Recommend Top 3 Staff & Assign',
-          action: 'recommend_staff',
-          params: { clientCode: draftTask.clientCode, natureOfWork: draftTask.natureOfWork, limit: 3 }
-        },
-        {
-          label: '⭐ Recommend Top 5 Staff & Assign',
-          action: 'recommend_staff',
-          params: { clientCode: draftTask.clientCode, natureOfWork: draftTask.natureOfWork, limit: 5 }
-        },
-        {
-          label: '➕ Create as Unassigned',
-          action: 'create_task',
-          params: draftTask
-        }
-      ];
-
-      return res.status(200).json({
-        success: true,
-        reply: replyMsg,
-        draft: draftTask,
-        chips
-      });
-    }
-
     // =========================================================================
-    // E. GENERAL SEARCH & RAG (Clients, Tasks, Attendance, Google Drive)
+    // GENERAL SEARCH & RAG (Clients, Tasks, Attendance, Google Drive)
     // =========================================================================
 
     let recordsFound = {
@@ -651,7 +935,7 @@ module.exports = async (req, res) => {
       recordsFound.attendance = await attendanceCol.find(attQuery).limit(10).toArray();
     }
 
-    // Query Google Drive if keywords match
+    // Google Drive RAG
     try {
       const driveConfigDoc = await db.collection('settings').findOne({ key: 'google_drive_config' });
       if (driveConfigDoc && driveConfigDoc.credentials) {
@@ -659,14 +943,14 @@ module.exports = async (req, res) => {
         if (matchedClients.length > 0) driveKeywords = String(matchedClients[0].id);
 
         const crypto = require('crypto');
-        const now = Math.floor(Date.now() / 1000);
+        const nowSec = Math.floor(Date.now() / 1000);
         const header = { alg: 'RS256', typ: 'JWT' };
         const claimSet = {
           iss: driveConfigDoc.credentials.client_email,
           scope: 'https://www.googleapis.com/auth/drive.readonly',
           aud: 'https://oauth2.googleapis.com/token',
-          exp: now + 3600,
-          iat: now
+          exp: nowSec + 3600,
+          iat: nowSec
         };
         const base64UrlEncode = (str) => Buffer.from(str).toString('base64url');
         const encodedHeader = base64UrlEncode(JSON.stringify(header));
@@ -711,7 +995,7 @@ module.exports = async (req, res) => {
           chips.push({
             label: `➕ New Task for ${c.name}`,
             action: 'prompt_text',
-            text: `Create task for ${c.name} (#${c.id})`
+            text: `Create GST Monthly Return for ${c.name} (#${c.id}) due 20th next month, recommend top 3 staff`
           });
         }
       });
@@ -755,9 +1039,9 @@ module.exports = async (req, res) => {
     }
 
     if (!reply) {
-      reply = `I could not find matching records for **"${query}"**.\n\nYou can ask me to:\n- 📝 *"Create a task for [Client Name]"*\n- ⭐ *"Recommend top 3 staff for GST return"*\n- 🔄 *"Proceed status of task #12345"*`;
+      reply = `I could not find matching records for **"${query}"**.\n\nYou can describe any action in natural language or full paragraph, e.g.:\n- *"Create a task for Alpha Corp for GST Monthly Return period 2026-10 due 2026-11-20, recommend top 3 staff and assign to best"*`;
       if (isAdmin) {
-        chips.push({ label: '➕ Create New Task', action: 'prompt_text', text: 'Create a new task' });
+        chips.push({ label: '➕ Create GST Task', action: 'prompt_text', text: 'Create GST Monthly Return for Alpha Corp due on 20th next month, recommend top 3 staff and assign to best' });
         chips.push({ label: '⭐ Recommend Top 3 Staff', action: 'recommend_staff', params: { limit: 3 } });
         chips.push({ label: '🕒 Check Attendance', action: 'prompt_text', text: 'Who is present today?' });
       }
