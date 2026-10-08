@@ -1,0 +1,151 @@
+const { connectToDatabase } = require('./db');
+const { verifyToken, checkRole, logAuditAction } = require('./auth');
+
+module.exports = async (req, res) => {
+  try {
+    const decoded = verifyToken(req);
+    if (!decoded) {
+      return res.status(401).json({ success: false, message: 'Unauthorized: Missing or invalid token.' });
+    }
+
+    if (!checkRole(decoded, ['partner'])) {
+      return res.status(403).json({ success: false, message: 'Forbidden: Admins only.' });
+    }
+
+    const { db } = await connectToDatabase();
+    const clientsCol = db.collection('clients');
+    const tasksCol = db.collection('tasks');
+    const usersCol = db.collection('users');
+
+    const action = req.query.action || (req.body && req.body.action) || 'preview';
+
+    // Eligible operators (staff and articles)
+    const operators = await usersCol.find({ role: { $in: ['staff', 'article'] } }).toArray();
+    const opUsernames = operators.map(o => o.username.toLowerCase());
+
+    // 1. PREVIEW: Auto-detect upcoming filings and recommend assignments
+    if (action === 'preview') {
+      const now = new Date();
+      const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
+      const currentYear = now.getFullYear();
+      const currentPeriod = `${currentYear}-${currentMonth}`;
+
+      // Find active clients with GST
+      const gstClients = await clientsCol.find({
+        status: { $ne: 'Inactive' },
+        gstNumber: { $exists: true, $ne: '' }
+      }).limit(50).toArray();
+
+      // Check existing tasks for current period to avoid duplicates
+      const existingTasks = await tasksCol.find({
+        natureOfWork: 'GST Monthly Return',
+        assessmentYear: currentPeriod
+      }).toArray();
+      const existingClientCodes = new Set(existingTasks.map(t => String(t.clientCode)));
+
+      const pendingProposals = [];
+
+      for (const client of gstClients) {
+        const cCode = String(client.id);
+        if (existingClientCodes.has(cCode)) continue;
+
+        // Auto-recommend best operator based on history
+        let bestOp = client.gstStaff || null;
+        let reason = "Pre-assigned GST Staff";
+
+        if (!bestOp) {
+          // Find past filings for this client
+          const pastTask = await tasksCol.findOne({
+            clientCode: cCode,
+            currentStatus: 'Filed',
+            workTakenBy: { $in: opUsernames }
+          });
+          if (pastTask) {
+            bestOp = pastTask.workTakenBy;
+            reason = "Handled past filings for this client";
+          } else {
+            // Find operator with least active load
+            const loadStats = await tasksCol.aggregate([
+              { $match: { currentStatus: { $nin: ['Filed', 'Unassigned'] }, workTakenBy: { $in: opUsernames } } },
+              { $group: { _id: '$workTakenBy', count: { $sum: 1 } } }
+            ]).toArray();
+            const counts = {};
+            loadStats.forEach(l => { counts[l._id] = l.count; });
+            const leastLoaded = operators.slice().sort((a, b) => (counts[a.username] || 0) - (counts[b.username] || 0))[0];
+            if (leastLoaded) {
+              bestOp = leastLoaded.username;
+              reason = "Lowest active workload";
+            }
+          }
+        }
+
+        const opDetails = operators.find(o => o.username.toLowerCase() === (bestOp || '').toLowerCase());
+
+        pendingProposals.push({
+          clientCode: cCode,
+          clientName: client.name,
+          natureOfWork: 'GST Monthly Return',
+          assessmentYear: currentPeriod,
+          recommendedOperator: bestOp || '',
+          operatorName: opDetails ? opDetails.name : (bestOp || 'Unassigned'),
+          dueDate: `${currentYear}-${currentMonth}-20`,
+          recommendationReason: reason
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        proposals: pendingProposals,
+        totalCount: pendingProposals.length,
+        period: currentPeriod
+      });
+    }
+
+    // 2. DISPATCH: 1-Click Approve and Auto-Generate Tasks
+    if (action === 'dispatch') {
+      const { items } = req.body;
+      if (!items || !Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, message: 'No items provided for dispatch.' });
+      }
+
+      const today = new Date().toISOString().split('T')[0];
+      const tasksToInsert = [];
+
+      for (const item of items) {
+        tasksToInsert.push({
+          dateReceived: today,
+          clientId: Number(item.clientCode) || item.clientCode,
+          clientCode: String(item.clientCode),
+          clientName: item.clientName,
+          natureOfWork: item.natureOfWork,
+          assessmentYear: item.assessmentYear,
+          workTakenBy: item.recommendedOperator || 'Unassigned',
+          currentStatus: item.recommendedOperator ? 'Preparation' : 'Unassigned',
+          status: item.recommendedOperator ? 'Preparation' : 'Unassigned',
+          dueDate: item.dueDate || today,
+          remarks: 'Auto-generated by AI Pipeline Assistant',
+          sendBackCount: 0,
+          createdAt: new Date()
+        });
+      }
+
+      const result = await tasksCol.insertMany(tasksToInsert);
+
+      await logAuditAction(db, decoded.username, 'BATCH_AUTO_DISPATCH', {
+        count: result.insertedCount,
+        firstClient: items[0].clientName
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: `Successfully automated and created ${result.insertedCount} compliance tasks!`,
+        count: result.insertedCount
+      });
+    }
+
+    return res.status(400).json({ success: false, message: 'Invalid action.' });
+  } catch (err) {
+    console.error('Automate API error:', err);
+    return res.status(500).json({ success: false, message: 'Automation engine error: ' + err.message });
+  }
+};
